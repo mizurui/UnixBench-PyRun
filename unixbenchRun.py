@@ -12,7 +12,7 @@
 # Replacing UnixBench Perl Script
 ##############################################################
 
-import os, sys, time, datetime
+import os, sys, time, datetime, re
 
 #####################
 # Configuration
@@ -472,5 +472,41 @@ def processCpuFlags(flagStr):
 	return ", ".join(names)
 
 def getCpuInfo():
-	...
+	if sys.platform == "linux":
+		cpuinfo = "/proc/cpuinfo"
+		kvRegex = re.compile(r'(.+):(.*)')
+		cpus = {}
+		cpu = 0
+		try:
+			if os.path.exists(cpuinfo):
+				with open(cpuinfo, "r") as fd:
+					line = fd.readline().strip()
+					while line:
+						linePart = kvRegex.findall(line)
+						if len(linePart) <= 1:
+							line = fd.readline().strip()
+							continue
+						field = linePart[0][0].strip()
+						value = linePart[0][1].strip()
+						if "processor" in field:
+							cpu = value
+							if cpu not in cpus:
+								cpus[cpu] = {}
+						elif "model name" in field:
+							cpus[cpu]['model'] = value
+						elif "bogomips" in field:
+							cpus[cpu]['bogo'] = value
+						elif "flags" in field:
+							cpus[cpu]['flags'] = processCpuFlags(value)
+			else:
+				raise RuntimeError("cpuinfo not exists")
+		except BaseException as e:
+			print("cannot read cpuinfo")
+			return None
+		return cpus
+	elif sys.platform == "win32":
+		raise NotImplementedError("not supported platform 'win32'")
+
+
+
 
