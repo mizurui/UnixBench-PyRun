@@ -13,6 +13,8 @@
 ##############################################################
 
 import os, sys, time, datetime, re
+import stat
+import math
 
 #####################
 # Configuration
@@ -447,10 +449,10 @@ def printLog(logFile, *args):
 		fd.close()
 	else:
 		fd.close()
-		raise RuntimeError(f"can't write to file {logfile}")
+		raise RuntimeError(f"can't write to file {logFile}")
 
 def number(n, what, plural):
-	plural = what + "s" if not plural
+	plural = what + "s" if not plural else plural
 	if n:
 		return f"unknown {plural}"
 	else:
@@ -507,6 +509,145 @@ def getCpuInfo():
 	elif sys.platform == "win32":
 		raise NotImplementedError("not supported platform 'win32'")
 
+def getSystemInfo():
+	info = {
+		'name': getCmdOutput("hostname"),
+		'os': getCmdOutput("uname -o"),
+		'osRel': getCmdOutput("uname -r"),
+		'osVer': getCmdOutput("uname -v"),
+		'mach': getCmdOutput("uname -m"),
+		'platform': getCmdOutput("uname -i"),
+	}
+	if not info['os']:
+		info['os'] = getCmdOutput("uname -s")
+
+	info['system'] = info['os']
+	if os.path.exists("/etc/SuSE-release"):
+		info['system'] = getCmdOutput("cat /etc/SuSE-release")
+	elif os.path.exists("/etc/release"):
+		info['system'] = getCmdOutput("cat /etc/release")
+
+	lang = getCmdOutput("printenv LANG")
+	map = getCmdOutput("locale -k LC_CTYPE | grep charmap")
+	map = re.sub('.*=', '', map)
+	coll = getCmdOutput("locale -k LC_COLLATE | grep collate-codeset")
+	coll = re.sub('.*=', '', coll)
+	info['language'] = "%s (charmap=%s, collate=%s)" % (lang, map, coll)
+
+	cpus = getCpuInfo()
+	if cpus:
+		info['cpus'] = cpus
+		info['numCpus'] = len(cpus)
+
+	info['graphics'] = getCmdOutput("3dinfo | cut -f1 -d\'(\'")
+
+	info['runlevel'] = getCmdOutput("runlevel | cut -f2 -d\"(\"")
+	info['load'] = getCmdOutput("uptime")
+	info['numUsers'] = getCmdOutput("who | wc -l")
+
+	return info
+
+def abortRun(err):
+	print("\n" + ("*" * 46), file=sys.stderr)
+	print("Run: %s; aborting" % err)
+	return sys.exit(1)
+
+def preChecks():
+	os.environ['LANG'] = language
+
+	retcode = os.system("make check")
+	if retcode:
+		retcode = os.system("make all")
+		if retcode:
+			abortRun("\"make all\" failed")
+
+	with open(os.path.join(TMPDIR, "kill_run"), 'w') as fd:
+		fd.write("echo kill -9 %d" % os.getpid())
+
+	os.chmod(os.path.join(TMPDIR, "kill_run"), stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+
+def parseArgs():
+	import argparse
+	arg = argparse.ArgumentParser(description="UnixBench Python-scripted Run")
+	arg.add_argument("-q", "--quiet", action="store", default=False, type=bool, help="quiet mode")
+	arg.add_argument("-v", "--verbose", action="store", default=False, type=bool, help="verbose mode")
+	arg.add_argument("-i", "--iterations", action="")
+	...
+
+def readResultsFromFile(file):
+	if not os.path.exists(file):
+		return None
 
 
+	fd = open(file, "r")
+	try:
+		results = {}
+		line = fd.readline()
+		while line:
+			line = line.strip()
+			if not line:
+				line = fd.readline()
+				continue
+			name, time, slab, sum, score, iters = line.strip('|')
+			bresult = {
+				'score': score,
+				'scorelabel': slab,
+				'time': time,
+				'iterations': iters,
+			}
+			results[name] = bresult
 
+		fd.close()
+		return results
+	except BaseException as e:
+		if not fd.closed:
+			fd.close()
+		raise e
+
+def combinePassResults(bench, tdata, bresult, logFile):
+	bresult['cat'] = tdata['cat']
+
+	iterations = 0
+	totalTime = 0
+	sum = 0
+	product = 0
+	label = None
+
+	pres: dict = bresult['passes']
+
+	npasses = len(pres)
+	ndump = npasses // 3
+
+	for presult in sorted(pres, key=lambda x: x['COUNT0']):
+		count = presult['COUNT0']
+		timebase = presult['COUNT1']
+		label = presult['COUNT2']
+		time = presult['TIME'] if presult['TIME'] else presult['elapsed']
+		
+		if ndump > 0:
+			printLog(logFile, "*Dump score: %12.1f\n" % count)
+			ndump -= 1
+			continue
+			
+		iterations += 1
+		printLog(logFile, "Count score: %12.1f\n" % count)
+		
+		if timebase > 0:
+			sum += count / (time / timebase)
+			product += math.log(count) - math.log(time / timebase)
+		else:
+			sum += count
+			product += math.log(count)
+		totalTime += time
+		
+	if iterations > 0:
+		bresult['score'] = math.exp(product / iterations)
+		bresult['scorelabel'] = label
+		bresult['time'] = totalTime / iterations
+		bresult['iterations'] = iterations
+	else:
+		bresult['error'] = "No measured results"
+		
+def indexResults(results):
+	if not index:
+		return
