@@ -15,6 +15,7 @@
 import os, sys, time, datetime, re
 import stat
 import math
+import subprocess
 
 #####################
 # Configuration
@@ -405,7 +406,6 @@ x86CpuFlags = {
 	'svm': "AMD virtualization",
 }
 
-import subprocess
 # Utilities
 
 def command(cmd):
@@ -414,8 +414,7 @@ def command(cmd):
 							   stdin=subprocess.PIPE,
 							   stdout=subprocess.PIPE,
 							   stderr=subprocess.PIPE,
-							   shell=True,
-							   encoding="utf-8")
+							   shell=True)
 	pid = process.pid
 	return pid, process
 
@@ -451,7 +450,7 @@ def printLog(logFile, *args):
 		fd.close()
 		raise RuntimeError(f"can't write to file {logFile}")
 
-def number(n, what, plural):
+def number(n, what, plural=None):
 	plural = what + "s" if not plural else plural
 	if n:
 		return f"unknown {plural}"
@@ -649,5 +648,581 @@ def combinePassResults(bench, tdata, bresult, logFile):
 		bresult['error'] = "No measured results"
 		
 def indexResults(results):
+	index = readResultsFromFile(os.path.join(BINDIR, "index.base"))
 	if not index:
 		return
+
+	numCat = {}
+	for bench in results['list']:
+		bresult = results[bench]
+		if bresult['cat'] in numCat:
+			numCat[bresult['cat']] += 1
+		else:
+			numCat[bresult['cat']] = 0
+	results['numCat'] = numCat
+
+	numIndex = {}
+	indexed = {}
+	sum = {}
+	for bench in sorted(index.keys()):
+		tdata = testParams[bench]
+		if not tdata:
+			abortRun(f"unknown benchmark \"{bench}\" in {BINDIR}/index.base")
+
+		cat = tdata['cat']
+		numIndex[cat] += 1
+
+		if bench not in results or not results[bench]:
+			continue
+
+		iresult = index[bench]
+		bresult = results[bench]
+		ratio = bresult['score'] / iresult['score']
+
+		bresult['iscore'] = iresult['score']
+		bresult['index'] = ratio * 10
+
+		sum[cat] += math.log(ratio)
+		indexed[cat] += 1
+
+	results['indexed'] = indexed
+	results['numIndex'] = numIndex
+	for c in sorted(indexed.keys())
+		if indexed[c] > 0:
+			results['index'][c] = math.exp(sum[c] / indexed[c]) * 10
+
+
+def commandBuffered(cmd):
+
+	benchStart = time.time()
+	cmdPid, cmdFd = command(cmd)
+
+	cmdFd.wait(300)
+	output = cmdFd.stdout.read()
+
+	elTime = time.time() - benchStart
+	output += ("elapsed|%f\n" % elTime)
+
+	if cmdFd.poll() is not None:
+		cmdFd.terminate()
+	if not cmdFd.stdin.closed:
+		cmdFd.stdin.close()
+	if not cmdFd.stdout.closed:
+		cmdFd.stdout.close()
+	if not cmdFd.stderr.closed:
+		cmdFd.stderr.close()
+	status = cmdFd.returncode
+	output += ("status|%d\n", status)
+
+	return cmdPid, output
+
+def readResults(pid, output):
+	presult = {
+		'pid': pid,
+		'ERROR': "",
+	}
+	for line in output.split('\n'):
+		line: str = line.strip()
+		splitParams = line.split('|')
+		field = splitParams[0]
+		if len(splitParams) <= 1:
+			presult['ERROR'] += ("\n" if presult['ERROR'] else "")
+			presult['ERROR'] += splitParams
+		elif len(splitParams) == 2:
+			presult[field] = splitParams[1]
+		else:
+			# Store the values in separate fields, named "FIELD{i}".
+			for x in range(1, len(splitParams)-1):
+				presult[f"{field}{x}"] = splitParams[x]
+
+	if presult['status'] != 0 and ('ERROR' not in presult):
+		presult['ERROR'] = f"command returned status {presult['status']}"
+
+	return presult
+
+def executeBenchmark(command, copies):
+	ctxt = []
+
+	for i in range(copies):
+		cmdPid, cmdOutput = commandBuffered(command)
+		ctxt.append({
+			'pid': cmdPid,
+			'fd': cmdOutput
+		})
+
+	pres = []
+	for i in range(copies):
+		presult = readResults(ctxt[i]['pid'], ctxt[i]['fd'])
+		pres.append(presult)
+
+	return pres
+
+def runOnePass(params, verbose, logFile, copies):
+	command = params['command']
+	if verbose > 1:
+		print()
+		print(f"COMMAND: \"{command}\"")
+		print(f"COPIES: \"{copies}\"")
+
+	pwd = os.getcwd()
+	os.chdir(TESTDIR)
+
+	copyResults = executeBenchmark(command, copies)
+	printLog(logFile, "\n")
+
+	os.chdir(pwd)
+
+	count = time = elap = 0
+
+	for res in copyResults:
+		for k in sorted(res.keys()):
+			printLog(logFile, f"# {k}: {res[k]}\n")
+		printLog(logFile, "\n")
+
+		if 'ERROR' in res and res['ERROR']:
+			name = params['logmsg']
+			abortRun(f"\"{name}\": {res['ERRPR']}")
+
+		count += res['COUNT0']
+		time += res['TIME'] if 'TIME' in res and res['TIME'] else res['elapsed']
+		elap += res['elapsed']
+
+	passResult = copyResults[0]
+	passResult['COUNT0'] = count
+	passResult['TIME'] = time / copies
+	passResult['elapsed'] = elap / copies
+
+	return passResult
+
+def runBenchmark(bench, tparams, verbose, logFile, copies):
+	params = mergeParams(baseParams, tparams)
+
+	prog = params['prog'] if 'prog' in params and params['prog'] else os.path.join(BINDIR, bench)
+	command = "\"%s\" %s" % (prog, params['options'])
+	command += f" < \"{params['stdin']}\"" if params['stdin'] else ""
+	command += " 2>&1"
+	command += f" >> \"{logFile}\"" if params['stdout'] else " > /dev/null"
+	params['command'] = command
+
+	bresult = {
+		'name': bench
+		'msg': params['logmsg']
+	}
+
+	if verbose > 0:
+		print("\n%d x %s " % (copies, params['logmsg']))
+
+	printLog(logFile, "\n########################################################\n")
+	printLog(logFile, "%s -- %s\n" % (params['logmsg'], number(copies, "copy", "copies")))
+	printLog(logFile, "==> %s\n\n" % command)
+
+	repeats = longIterCount if params['repeat'] == 'long' else shortIterCount
+	repeats = 1 if params['repeat'] == "single" else repeats
+	pres = []
+	for i in range(1, repeats + 1):
+		printLog(logFile, "#### Pass %d\n\n" % i)
+
+		if sys.platform == 'linux':
+			os.sync()
+			time.sleep(1)
+			os.sync()
+			time.sleep(2)
+
+		if verbose > 0:
+			print(" %d" % i)
+
+		presult = runOnePass(params, verbose, logFile, copies)
+		pres.append(presult)
+
+	bresult['passes'] = pres
+
+	combinePassResults(bench, tparams, bresult, logFile)
+
+	if copies == 1:
+		printLog(logFile, "\n>>>> Result of 1 copy\n")
+	else:
+		printLog(logFile, "\n>>>> Sum of %d copies\n" % copies)
+
+	for k in ('score', 'time', 'iterations'):
+		printLog(logFile, ">>>> %s: %s\n" % (k, bresult[k]))
+
+	printLog(logFile, "\n")
+
+	if bench == "C":
+		os.unlink(os.path.join(TESTDIR, "cctest.o"))
+		os.unlink(os.path.join(TESTDIR, "a.out"))
+	if verbose > 0:
+		print("\n")
+
+	return bresult
+
+def runTests(tests, verbose, logFile, copies):
+	results = {
+		'start': time.time(),
+		'copies': copies
+	}
+	for bench in tests:
+		if bench not in testParams:
+			abortRun(f"unknown benchmark \"{bench}\"")
+		params = testParams[bench]
+
+		cat = params['cat']
+		maxCopies = testCats[cat]['maxCopies']
+		if copies > maxCopies:
+			continue
+
+		bresult = runBenchmark(bench, params, verbose, logFile, copies)
+		results[bench] = bresult
+	results['end'] = time.time()
+
+	benches = filter(lambda key: key in results and isinstance(results[key], dict) and "msg" in results[key]['msg'], results.keys())
+	benches = sorted(benches, key=lambda x: x['msg'])
+	results['list'] = benches
+
+	indexResults(results)
+	return results
+
+def displaySystem(info, fd):
+	print("   System %s: %s" % (info['name'], info['system']), file=fd)
+	print("   OS: %s -- %s -- %s" % (info['os'], info['osRel'], info['osVer']), file=fd)
+	print("   Machine: %s (%s)" % (info['mach'], info['platform']), file=fd)
+	print("   Language: %s" % info['language'], file=fd)
+
+	if "cpus" not in info:
+		print("   CPU: no details avaliable", file=fd)
+	cpus = info['cpus']
+	for i, v in enumerate(cpus):
+		print("   CPU %d: %s (%.1f bogomips)" % (i, v['model'], v['bogo']), file=fd)
+		print("          %s" % cpus[i]['flags'], file=fd)
+
+	if 'graphics' in info and info['graphics']:
+		print("  Graphics: %s", info['graphics'], file=fd)
+
+	print("  %s; runlevel %s\n" % (info['load'], info['runlevel']), file=fd)
+
+def logResults(results, outFd):
+	for bench in results['list']:
+		bresult = results[bench]
+
+		print("%-40s %12.1f %-5s (%.1f s, %d samples)" % (
+			bresult['msg'],
+			bresult['score'],
+			bresult['scorelabel'],
+			bresult['time'],
+			bresult['iterations']
+		), file=outFd)
+
+		print(file=outFd)
+
+def logIndexCat(results, cat, outFd):
+	total = results['numIndex'][cat] if 'numIndex' in results and cat in results['numIndex'] else None
+	indexed = results['indexed'][cat] if 'indexed' in results and cat in results['indexed'] else None
+	iscore = results['index'][cat] if 'index' in results and cat in results['index'] else None
+	full = bool(total == indexed)
+
+	if indexed is None or indexed == 0:
+		print("No index results avaliable for %s\n" % testCats[cat]['name'], file=outFd)
+		return
+
+	head = {testCats[cat]['name']} + (" Index Values" if full else " Partial Index")
+	print("%-40s %12s %12s %8s" % (head, "BASELINE", "RESULT", "INDEX"), file=outFd)
+
+	for bench in results['list']:
+		bresult = results[bench]
+		if bresult['cat'] != cat:
+			continue
+
+		if 'iscore' in bresult and 'index' in bresult:
+			print("%-40s %12.1f %12.1f %8.1f" % (
+				bresult['msg'], bresult['iscore'],
+				bresult['score'], bresult['index']
+			), file=outFd)
+		else:
+			print("%-40s %12s %12.1f %8s" % (
+				bresult['msg'], "---",
+				bresult['score'], "---"
+			), file=outFd)
+
+	title = testCats[cat]['name'] + " Index Score"
+	if not full:
+		title += " (Partial Only)"
+	print("%-40s %12s %12s %8s" % ("", "", "", "========"), file=outFd)
+	print("%-66s %8.1f" % (title, iscore), file=outFd)
+
+	print(file=outFd)
+
+def logIndex(results, outFd):
+	count = results['indexed']
+	for cat in count.keys():
+		logIndexCat(results, cat, outFd)
+
+def summarizeRun(systemInfo, results, verbose, reportFd):
+	print("------------------------------------------------------------------------", file=reportFd)
+	print("Benchmark Run: %s %s - %s" % (
+		time.strftime("%Y-%m-%d", time.localtime(results['start'])),
+		time.strftime("%H:%M:%S", time.localtime(results['start'])),
+		time.strftime("%H:%M:%S", time.localtime(results['end']))
+	), file=reportFd)
+	print("%s in system; running %s of tests" % (
+		number(systemInfo['numCpus'], "CPU"),
+		number(results['copies'], "parallel copy", "parallel copies")
+	), file=reportFd)
+	print(file=reportFd)
+
+	logResults(results, reportFd)
+
+	logIndex(results, reportFd)
+
+def runHeaderHtml(systemInfo, reportFd):
+	title = "Benchmark of %s / %s on %s" % (
+		systemInfo['name'], systemInfo['system'],
+		time.strftime("%Y-%m-%d", time.localtime())
+	)
+	print("""
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+"http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="keywords" content="linux, benchmarks, benchmarking">
+  <title>$title</title>
+  <style type="text/css">
+    table {
+      margin: 1em 1em 1em 0;
+      background: #f9f9f9;
+      border: 1px #aaaaaa solid;
+      border-collapse: collapse;
+    }
+
+    table th, table td {
+      border: 1px #aaaaaa solid;
+      padding: 0.2em;
+    }
+
+    table th {
+      background: #f2f2f2;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+	""", file=reportFd)
+
+	print("<h2>%s</h2>" % title, file=reportFd)
+	print("<p><b>BYTE UNIX Benchmarks (Version %s)</b></p>\n" % version, file=reportFd)
+
+def displaySystemHtml(info, fd):
+	print("<h3>Test System Information</h3>", file=fd)
+	print("<p><table>", file=fd)
+
+	print("<tr>", file=fd)
+	print("    <td><b>System:</b></td>", file=fd)
+	print("    <td colspan=2>%s: %s</td>" % (info['name'], info['system']), file=fd)
+	print("</tr><tr>", file=fd)
+	print("    <td><b>OS:</b></td>", file=fd)
+	print("    <td colspan=2>%s -- %s -- %s</td>" % (info['os'], info['osRel'], info['osVer']), file=fd)
+	print("</tr><tr>", file=fd)
+	print("    <td><b>Machine:</b></td>", file=fd)
+	print("    <td colspan=2>%s: %s</td>" % (info['mach'], info['platform']), file=fd)
+	print("</tr><tr>", file=fd)
+	print("    <td><b>Language:</b></td>", file=fd)
+	print("    <td colspan=2>%s</td>" % info['language'], file=fd)
+	print("</tr>", file=fd)
+
+	if 'cpus' not in info:
+		print("<tr>", file=fd)
+		print("    <td><b>CPUs:</b></td>", file=fd)
+		print("    <td colspan=2>no details available</td>", file=fd)
+		print("</tr>", file=fd)
+	else:
+		cpus = info['cpus']
+		for i, v in enumerate(cpus):
+			print("<tr>", file=fd)
+			if i == 0:
+				print("    <td rowspan=%d><b>CPUs:</b></td>" % (i + 1), file=fd)
+			print("    <td><b>%d:</b></td>" % i, file=fd)
+			print("    <td>%s (%.1f bogomips)<br />" % (cpus[i]['model'], cpus[i]['bogo']), file=fd)
+			print("    %s</td>" % cpus[i]['flags'], file=fd)
+			print("</tr>", file=fd)
+
+	if "graphics" in info and info['graphics']:
+		print("<tr>", file=fd)
+		print("    <td><b>Graphics:</b></td>", file=fd)
+		print("    <td colspan=2>%s</td>" % info['graphics'], file=fd)
+		print("</tr>", file=fd)
+
+	print("<tr>", file=fd)
+	print("    <td><b>Uptime:</b></td>", file=fd)
+	print("    <td colspan=2>%s; runlevel %s</td>" % (info['load'], info['runlevel']), file=fd)
+	print("</tr>", file=fd)
+
+	print("</table></p>\n", file=fd)
+
+def logCatResultHtml(results, cat, fd):
+	numIndex = results['numIndex'][cat] if 'numIndex' in results and cat in results['numIndex'] else None
+	indexed = results['indexed'][cat] if 'indexed' in results and cat in results['indexed'] else None
+	iscore = results['index'][cat] if "index" in results and cat in results['index'] else None
+	full = indexed is not None and indexed == numIndex
+
+	if "numCat" not in results or cat not in results['numCat'] or results['numCat'][cat] == 0:
+		return
+
+	warn = ""
+	if indexed and indexed == 0:
+		warn = " - no index results available"
+	elif not full:
+		warn = " - not all index tests were run;" + \
+			   " only a partial index score is available"
+	print("<h4>%s%s</h4>" % (testCats[cat]['name'], warn), file=fd)
+
+	print("<p><table width=\"100%\"", file=fd)
+
+	print("<tr>", file=fd)
+	print("    <th align=left>Test</th>", file=fd)
+	print("    <th align=right>Score</th>", file=fd)
+	print("    <th align=left>Unit</th>", file=fd)
+	print("    <th align=right>Time</th>", file=fd)
+	print("    <th align=right>Iters.</th>", file=fd)
+	print("    <th align=right>Baseline</th>", file=fd)
+	print("    <th align=right>Index</th>", file=fd)
+	print("</tr>", file=fd)
+
+	for bench in results['list']:
+		bresult = results[bench]
+		if bresult['cat'] != cat:
+			continue
+
+		print("<tr>", file=fd)
+		print("    <td><b>%s</b></td>" % bresult['msg'], file=fd)
+		print("    <td align=right><tt>%.1f</tt></td>" % bresult['score'], file=fd)
+		print("    <td align=left><tt>%s</tt></td>" % bresult['scorelabel'], file=fd)
+		print("    <td align=right><tt>%.1f s</tt></td>" % bresult['time'], file=fd)
+		print("    <td align=right><tt>%d</tt></td>" % bresult['iterations'], file=fd)
+
+		if "index" in bresult and bresult['index']:
+			print("    <td align=right><tt>%.1f</tt></td>" % bresult['iscore'], file=fd)
+			print("    <td align=right><tt>%.1f</tt></td>" % bresult['index'], file=fd)
+
+		print("</tr>", file=fd)
+
+	if indexed and indexed > 0:
+		title = testCats[cat]['name'] + " Index Score"
+		if not full:
+			title += " (Partial Only)"
+		print("<tr>", file=fd)
+		print("    <td colspan=6><b>%s:</b></td>" % title, file=fd)
+		print("    <td align=right><b><tt>%.1f</tt></b></td>" % iscore, file=fd)
+		print("</tr>", file=fd)
+
+	print("</table></p>\n", file=fd)
+
+def logResultsHtml(results, fd):
+	for cat in testCats.keys():
+		logCatResultHtml(results, cat, fd)
+
+def summarizeRunHtml(systemInfo, results, verbose, reportFd):
+	time = results['end'] - results['start']
+	print("<p><hr/></p>", file=reportFd)
+	print("<h3>Benchmark Run: %s; %s</h3>" % (
+		number(systemInfo['numCpus'], "CPU"),
+		number(results['copies'], "parallel process", "parallel processes")
+	), file=reportFd)
+	print("<p>Time: %s - %s; %dm %02ds</p>" % (
+		time.strftime("%H:%M:%S", time.localtime(results['start'])),
+		time.strftime("%H:%M:%S", time.localtime(results['end'])),
+		int(time // 60), time % 60
+	), file=reportFd)
+	print(file=reportFd)
+
+	logResultsHtml(results, reportFd)
+
+def runFooterHtml(reportFd):
+	print("""
+<p><hr/></p>
+<div><b>No Warranties:</b> This information is provided free of charge and "as
+is" without any warranty, condition, or representation of any kind,
+either express or implied, including but not limited to, any warranty
+respecting non-infringement, and the implied warranties of conditions
+of merchantability and fitness for a particular purpose. All logos or
+trademarks on this site are the property of their respective owner. In
+no event shall the author be liable for any
+direct, indirect, special, incidental, consequential or other damages
+howsoever caused whether arising in contract, tort, or otherwise,
+arising out of or in connection with the use or performance of the
+information contained on this web site.</div>
+</body>
+</html>
+	""", file=reportFd)
+
+# MAIN
+
+def main():
+	args = sys.argv
+
+	params = {} #parseArgs(args)
+	verbose = params['verbose'] if 'verbose' in params and params['verbose'] else 1
+	if 'iterations' in params and params['iterations']:
+		longIterCount = params['iterations']
+		shortIterCount = int((params['iterations'] + 1) // 3)
+		shortIterCount = 1 if shortIterCount < 1 else shortIterCount
+
+	tests = params['tests'] if 'tests' in params else {}
+	if len(tests) < 0:
+		tests = index
+
+	preChecks()
+	systemInfo = getSystemInfo()
+
+	copies = params['copies'] if 'copies' in params else []
+	if not copies or len(copies) == 0:
+		copies.append(1)
+		if 'numCpus' in systemInfo and system['numCpus'] > 1:
+			copies.append(systemInfo['numCpus'])
+
+	os.system(f"cat \"{os.path.join(BINDIR, 'unixbench.logo')}\"")
+
+	if verbose > 1:
+		print(f"\n{tests.join(', ')}", end="")
+		print("Tests to run: %s" % tests.join(", "))
+
+	reportFile = logFile(systemInfo)
+	reportHtml = reportFile + ".html"
+	logFile = reportFile + ".log"
+
+	reportFd = reportFd2 = None
+	try:
+		reportFd = open(reportFile, "w", encoding="utf-8")
+		reportFd2 = open(reportHtml, "w", encoding="utf-8")
+
+		print("   BYTE UNIX Benchmarks (Version %s)\n" % version, file=reportFd)
+		runHeaderHtml(systemInfo, reportFd2)
+
+		displaySystem(systemInfo, reportFd)
+		displaySystemHtml(systemInfo, reportFd2)
+
+		for c in copies:
+			if verbose > 1:
+				print("Run with %s", number(c, "copy", "copies"))
+
+			results = runTests(tests, verbose, logFile, c)
+
+			summarizeRun(systemInfo, results, verbose, reportFd)
+			summarizeRunHtml(systemInfo, results, verbose, reportFd2)
+
+		runFooterHtml(reportFd2)
+
+		if verbose > 0:
+			print()
+			print("========================================================================")
+			os.system(f"cat \"{reportFile}\"")
+
+	finally:
+		if reportFd and not reportFd.closed:
+			reportFd.close()
+		if reportFd2 and not reportFd2.closed:
+			reportFd2.close()
+
+	return 0
+
+if __name__ == "__main__":
+	sys.exit(main())
