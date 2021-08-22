@@ -4,12 +4,19 @@
 ##############################################################
 # UnixBench - Release 5.1.3, based on:
 # The BYTE UNIX Benchmarks - Release 3
-#  Module: Run   SID: 3.11 5/15/91 19:30:14
+#         Module: Run   SID: 3.11 5/15/91 19:30:14
 # Original Byte benchmarks written by:
-# Ruilx Alxa  GT-Soft Studio
+#       Ben Smith,              Tom Yager at BYTE Magazine
+#       ben@bytepb.byte.com     tyager@bytepb.byte.com
+# BIX:  bensmith                tyager
+#
+# Compatible to Python script was written by:
+#       Ruilx Alxa  GT-Soft Studio
 #
 ##############################################################
-# Replacing UnixBench Perl Script
+# General Purpose Benchmark
+# based on the work by Ken McDonell,
+#                         Computer Science, Monash University
 ##############################################################
 
 import os, sys, time, datetime, re
