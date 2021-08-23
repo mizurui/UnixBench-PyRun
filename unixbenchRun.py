@@ -472,7 +472,7 @@ def printLog(logFile, *args):
 
 def number(n, what, plural=None):
     plural = what + "s" if not plural else plural
-    if n:
+    if not n:
         return f"unknown {plural}"
     else:
         return "%d %s" % (n, what if n == 1 else plural)
@@ -620,14 +620,18 @@ def parseArgs():
         #     params['copies'] = []
         params['copies'] = args.copies
     if args.test_list:
-        if 'all' in arg.test_list:
+        if 'all' in args.test_list:
             for i, v in testList.items():
                 params['tests'].append(v)
         else:
-            for i in arg.test_list:
+            for i in args.test_list:
                 if i not in testList:
                     raise RuntimeError(f"Run: unknown test \"{i}\"")
-                params['tests'].append(testList[i])
+                if isinstance(testList[i], list):
+                    params['tests'].extend(testList[i])
+                else:
+                    params['tests'].append(testList[i] if testList[i] else i)
+            params['tests'] = sorted(list(set(params['tests'])))
     return params
 
 
@@ -679,8 +683,8 @@ def combinePassResults(bench, tdata, bresult, logFile):
     npasses = len(pres)
     ndump = npasses // 3
 
-    for presult in sorted(pres, key=lambda x: int(x['COUNT0'])):
-        count = int(presult['COUNT0'])
+    for presult in sorted(pres, key=lambda x: float(x['COUNT0'])):
+        count = float(presult['COUNT0'])
         timebase = int(presult['COUNT1'])
         label = presult['COUNT2']
         time = float(presult['TIME']) if presult['TIME'] else float(presult['elapsed'])
@@ -742,16 +746,21 @@ def indexResults(results):
 
         iresult = index[bench]
         bresult = results[bench]
-        ratio = bresult['score'] / iresult['score']
+        ratio = bresult['score'] / float(iresult['score'])
 
-        bresult['iscore'] = iresult['score']
+        bresult['iscore'] = float(iresult['score'])
         bresult['index'] = ratio * 10
 
+        if cat not in sum:
+            sum[cat] = 0.0
         sum[cat] += math.log(ratio)
+        if cat not in indexed:
+            indexed[cat] = 0
         indexed[cat] += 1
 
     results['indexed'] = indexed
     results['numIndex'] = numIndex
+    results['index'] = {}
     for c in sorted(indexed.keys()):
         if indexed[c] > 0:
             results['index'][c] = math.exp(sum[c] / indexed[c]) * 10
@@ -850,7 +859,7 @@ def runOnePass(params, verbose, logFile, copies):
             name = params['logmsg']
             abortRun(f"\"{name}\": {res['ERROR']}")
 
-        count += int(res['COUNT0'])
+        count += float(res['COUNT0'])
         time += float(res['TIME']) if 'TIME' in res and res['TIME'] else float(res['elapsed'])
         elap += float(res['elapsed'])
 
@@ -897,7 +906,7 @@ def runBenchmark(bench, tparams, verbose, logFile, copies):
             time.sleep(2)
 
         if verbose > 0:
-            print(" %d" % i, end="")
+            print(" %d" % i, end="", flush=True)
 
         presult = runOnePass(params, verbose, logFile, copies)
         pres.append(presult)
@@ -971,7 +980,7 @@ def displaySystem(info, fd):
     if 'graphics' in info and info['graphics']:
         print("  Graphics: %s", info['graphics'], file=fd)
 
-    print("  %s; runlevel %s\n" % (info['load'], info['runlevel']), file=fd)
+    print("   %s; runlevel %s\n" % (info['load'], info['runlevel']), file=fd)
 
 
 def logResults(results, outFd):
