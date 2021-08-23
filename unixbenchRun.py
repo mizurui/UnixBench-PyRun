@@ -42,6 +42,8 @@ BASEDIR = os.getcwd().strip()
 def getDir(var, default):
     val = os.getenv(var, default)
     wd = os.getcwd()
+    if not os.path.exists(val):
+        os.mkdir(val)
     os.chdir(val)
     val = os.getcwd()
     os.chdir(wd)
@@ -434,17 +436,17 @@ def command(cmd):
 
 
 def getCmdOutput(cmd):
-    timeout = 10
+    timeout = 300
     pid, process = command(cmd)
     returnCode = process.wait(timeout)
-    if not process.poll():
+    if process.poll() != 0:
         process.terminate()
         raise RuntimeError(f"Process '{process.pid}' ran timeout({timeout}s)")
-    stdout = process.stdout.read()
-    return stdout
+    stdout = process.stdout.read().strip()
+    return stdout.decode('utf-8')
 
 
-def logFile(sysInfo):
+def logFile_(sysInfo):
     count = 1
     ymd = time.strftime("%Y-%m-%d")
 
@@ -502,24 +504,29 @@ def getCpuInfo():
         try:
             if os.path.exists(cpuinfo):
                 with open(cpuinfo, "r") as fd:
-                    line = fd.readline().strip()
+                    line = fd.readline()
                     while line:
+                        line = line.strip()
+                        if not line:
+                            line = fd.readline()
+                            continue
                         linePart = kvRegex.findall(line)
-                        if len(linePart) <= 1:
-                            line = fd.readline().strip()
+                        if len(linePart) < 1:
+                            line = fd.readline()
                             continue
                         field = linePart[0][0].strip()
                         value = linePart[0][1].strip()
                         if "processor" in field:
-                            cpu = value
+                            cpu = int(value.strip())
                             if cpu not in cpus:
                                 cpus[cpu] = {}
                         elif "model name" in field:
                             cpus[cpu]['model'] = value
                         elif "bogomips" in field:
-                            cpus[cpu]['bogo'] = value
+                            cpus[cpu]['bogo'] = float(value)
                         elif "flags" in field:
                             cpus[cpu]['flags'] = processCpuFlags(value)
+                        line = fd.readline()
             else:
                 raise RuntimeError("cpuinfo not exists")
         except BaseException as e:
@@ -550,9 +557,9 @@ def getSystemInfo():
 
     lang = getCmdOutput("printenv LANG")
     map = getCmdOutput("locale -k LC_CTYPE | grep charmap")
-    map = re.sub('.*=', '', map)
+    map = re.sub(r'.*=', '', map)
     coll = getCmdOutput("locale -k LC_COLLATE | grep collate-codeset")
-    coll = re.sub('.*=', '', coll)
+    coll = re.sub(r'.*=', '', coll)
     info['language'] = "%s (charmap=%s, collate=%s)" % (lang, map, coll)
 
     cpus = getCpuInfo()
@@ -592,12 +599,11 @@ def preChecks():
 
 def parseArgs():
     arg = argparse.ArgumentParser(description="UnixBench Python-scripted Run")
-    arg.add_argument("-q", "--quiet", action="store_true", desc="quiet", default=False, type=bool, help="quiet mode")
-    arg.add_argument("-v", "--verbose", action="store_true", desc="verbose", default=False, type=bool,
-                     help="verbose mode")
-    arg.add_argument("-i", "--iterations", desc="iterations", type=str, help="iterations")
-    arg.add_argument("-c", "--copies", desc="copies", type=int, nargs="*", help="copies")
-    arg.add_argument("test_list", metavar="N", type=str, nargs="+", help="test items name")
+    arg.add_argument("-q", "--quiet", action="store_true", dest="quiet", default=False, help="quiet mode")
+    arg.add_argument("-v", "--verbose", action="store_true", dest="verbose", default=False, help="verbose mode")
+    arg.add_argument("-i", "--iterations", dest="iterations", type=str, help="iterations")
+    arg.add_argument("-c", "--copies", dest="copies", type=int, nargs="*", help="copies")
+    arg.add_argument("test_list", metavar="test list", type=str, nargs="*", help="test items name")
 
     args = arg.parse_args()
     params = {
@@ -638,7 +644,10 @@ def readResultsFromFile(file):
             if not line:
                 line = fd.readline()
                 continue
-            name, time, slab, sum, score, iters = line.strip('|')
+            if line.startswith("#"):
+                line = fd.readline()
+                continue
+            name, time, slab, sum, score, iters = line.split('|')
             bresult = {
                 'score': score,
                 'scorelabel': slab,
@@ -646,6 +655,7 @@ def readResultsFromFile(file):
                 'iterations': iters,
             }
             results[name] = bresult
+            line = fd.readline()
 
         fd.close()
         return results
@@ -669,11 +679,11 @@ def combinePassResults(bench, tdata, bresult, logFile):
     npasses = len(pres)
     ndump = npasses // 3
 
-    for presult in sorted(pres, key=lambda x: x['COUNT0']):
-        count = presult['COUNT0']
-        timebase = presult['COUNT1']
+    for presult in sorted(pres, key=lambda x: int(x['COUNT0'])):
+        count = int(presult['COUNT0'])
+        timebase = int(presult['COUNT1'])
         label = presult['COUNT2']
-        time = presult['TIME'] if presult['TIME'] else presult['elapsed']
+        time = float(presult['TIME']) if presult['TIME'] else float(presult['elapsed'])
 
         if ndump > 0:
             printLog(logFile, "*Dump score: %12.1f\n" % count)
@@ -723,6 +733,8 @@ def indexResults(results):
             abortRun(f"unknown benchmark \"{bench}\" in {BINDIR}/index.base")
 
         cat = tdata['cat']
+        if cat not in numIndex:
+            numIndex[cat] = 0
         numIndex[cat] += 1
 
         if bench not in results or not results[bench]:
@@ -750,7 +762,7 @@ def commandBuffered(cmd):
     cmdPid, cmdFd = command(cmd)
 
     cmdFd.wait(300)
-    output = cmdFd.stdout.read()
+    output = cmdFd.stdout.read().decode("utf-8")
 
     elTime = time.time() - benchStart
     output += ("elapsed|%f\n" % elTime)
@@ -764,7 +776,7 @@ def commandBuffered(cmd):
     if not cmdFd.stderr.closed:
         cmdFd.stderr.close()
     status = cmdFd.returncode
-    output += ("status|%d\n", status)
+    output += ("status|%d\n" % status)
 
     return cmdPid, output
 
@@ -780,13 +792,13 @@ def readResults(pid, output):
         field = splitParams[0]
         if len(splitParams) <= 1:
             presult['ERROR'] += ("\n" if presult['ERROR'] else "")
-            presult['ERROR'] += splitParams
+            presult['ERROR'] += field
         elif len(splitParams) == 2:
             presult[field] = splitParams[1]
         else:
             # Store the values in separate fields, named "FIELD{i}".
-            for x in range(1, len(splitParams) - 1):
-                presult[f"{field}{x}"] = splitParams[x]
+            for x in range(len(splitParams) -1):
+                presult[f"{field}{x}"] = splitParams[x + 1]
 
     if presult['status'] != 0 and ('ERROR' not in presult):
         presult['ERROR'] = f"command returned status {presult['status']}"
@@ -836,11 +848,11 @@ def runOnePass(params, verbose, logFile, copies):
 
         if 'ERROR' in res and res['ERROR']:
             name = params['logmsg']
-            abortRun(f"\"{name}\": {res['ERRPR']}")
+            abortRun(f"\"{name}\": {res['ERROR']}")
 
-        count += res['COUNT0']
-        time += res['TIME'] if 'TIME' in res and res['TIME'] else res['elapsed']
-        elap += res['elapsed']
+        count += int(res['COUNT0'])
+        time += float(res['TIME']) if 'TIME' in res and res['TIME'] else float(res['elapsed'])
+        elap += float(res['elapsed'])
 
     passResult = copyResults[0]
     passResult['COUNT0'] = count
@@ -866,10 +878,10 @@ def runBenchmark(bench, tparams, verbose, logFile, copies):
     }
 
     if verbose > 0:
-        print("\n%d x %s " % (copies, params['logmsg']))
+        print("\n%d x %s " % (copies, params['logmsg']), end="")
 
-    printLog(logFile, "\n########################################################\n")
-    printLog(logFile, "%s -- %s\n" % (params['logmsg'], number(copies, "copy", "copies")))
+    printLog(logFile, "\n########################################################")
+    printLog(logFile, "%s -- %s" % (params['logmsg'], number(copies, "copy", "copies")))
     printLog(logFile, "==> %s\n\n" % command)
 
     repeats = longIterCount if params['repeat'] == 'long' else shortIterCount
@@ -885,7 +897,7 @@ def runBenchmark(bench, tparams, verbose, logFile, copies):
             time.sleep(2)
 
         if verbose > 0:
-            print(" %d" % i)
+            print(" %d" % i, end="")
 
         presult = runOnePass(params, verbose, logFile, copies)
         pres.append(presult)
@@ -949,10 +961,12 @@ def displaySystem(info, fd):
 
     if "cpus" not in info:
         print("   CPU: no details avaliable", file=fd)
-    cpus = info['cpus']
-    for i, v in enumerate(cpus):
-        print("   CPU %d: %s (%.1f bogomips)" % (i, v['model'], v['bogo']), file=fd)
-        print("          %s" % cpus[i]['flags'], file=fd)
+    else:
+        cpus = info['cpus']
+
+        for i, v in cpus.items():
+            print("   CPU %d: %s (%.1f bogomips)" % (i, v['model'], v['bogo']), file=fd)
+            print("          %s" % cpus[i]['flags'], file=fd)
 
     if 'graphics' in info and info['graphics']:
         print("  Graphics: %s", info['graphics'], file=fd)
@@ -1069,8 +1083,7 @@ def runHeaderHtml(systemInfo, reportFd):
     }
   </style>
 </head>
-<body>
-	""", file=reportFd)
+<body>""", file=reportFd)
 
     print("<h2>%s</h2>" % title, file=reportFd)
     print("<p><b>BYTE UNIX Benchmarks (Version %s)</b></p>\n" % version, file=reportFd)
@@ -1189,7 +1202,7 @@ def logResultsHtml(results, fd):
 
 
 def summarizeRunHtml(systemInfo, results, verbose, reportFd):
-    time = results['end'] - results['start']
+    time_ = results['end'] - results['start']
     print("<p><hr/></p>", file=reportFd)
     print("<h3>Benchmark Run: %s; %s</h3>" % (
         number(systemInfo['numCpus'], "CPU"),
@@ -1198,7 +1211,7 @@ def summarizeRunHtml(systemInfo, results, verbose, reportFd):
     print("<p>Time: %s - %s; %dm %02ds</p>" % (
         time.strftime("%H:%M:%S", time.localtime(results['start'])),
         time.strftime("%H:%M:%S", time.localtime(results['end'])),
-        int(time // 60), time % 60
+        int(time_ // 60), time_ % 60
     ), file=reportFd)
     print(file=reportFd)
 
@@ -1234,7 +1247,7 @@ def main():
         shortIterCount = 1 if shortIterCount < 1 else shortIterCount
 
     tests = params['tests'] if 'tests' in params else {}
-    if len(tests) < 0:
+    if len(tests) <= 0:
         tests = index
 
     preChecks()
@@ -1243,7 +1256,7 @@ def main():
     copies = params['copies'] if 'copies' in params else []
     if not copies or len(copies) == 0:
         copies.append(1)
-        if 'numCpus' in systemInfo and system['numCpus'] > 1:
+        if 'numCpus' in systemInfo and systemInfo['numCpus'] > 1:
             copies.append(systemInfo['numCpus'])
 
     os.system(f"cat \"{os.path.join(BINDIR, 'unixbench.logo')}\"")
@@ -1252,13 +1265,14 @@ def main():
         print(f"\n{tests.join(', ')}", end="")
         print("Tests to run: %s" % tests.join(", "))
 
-    reportFile = logFile(systemInfo)
+    reportFile = logFile_(systemInfo)
     reportHtml = reportFile + ".html"
     logFile = reportFile + ".log"
 
     reportFd = reportFd2 = None
     try:
-        reportFd = open(reportFile, "w", encoding="utf-8")
+        #reportFd = open(reportFile, "w", encoding="utf-8")
+        reportFd = sys.stdout
         reportFd2 = open(reportHtml, "w", encoding="utf-8")
 
         print("   BYTE UNIX Benchmarks (Version %s)\n" % version, file=reportFd)
@@ -1270,7 +1284,6 @@ def main():
         for c in copies:
             if verbose > 1:
                 print("Run with %s", number(c, "copy", "copies"))
-
             results = runTests(tests, verbose, logFile, c)
 
             summarizeRun(systemInfo, results, verbose, reportFd)
