@@ -602,7 +602,7 @@ def parseArgs():
     arg.add_argument("-q", "--quiet", action="store_true", dest="quiet", default=False, help="quiet mode")
     arg.add_argument("-v", "--verbose", action="store_true", dest="verbose", default=False, help="verbose mode")
     arg.add_argument("-i", "--iterations", dest="iterations", type=str, help="iterations")
-    arg.add_argument("-c", "--copies", dest="copies", type=int, nargs="*", help="copies")
+    arg.add_argument("-c", "--copies", dest="copies", type=int, nargs="+", help="copies")
     arg.add_argument("test_list", metavar="test list", type=str, nargs="*", help="test items name")
 
     args = arg.parse_args()
@@ -953,9 +953,12 @@ def runTests(tests, verbose, logFile, copies):
         results[bench] = bresult
     results['end'] = time.time()
 
-    benches = filter(lambda key: key in results and isinstance(results[key], dict) and "msg" in results[key]['msg'],
-                     results.keys())
-    benches = sorted(benches, key=lambda x: x['msg'])
+    benches = filter(lambda key: key in results and isinstance(results[key], dict) and "msg" in results[key], results)
+    benchResult = {}
+    for bench in benches:
+        benchResult[results[bench]['msg']] = results[bench]
+
+    benches = {benchResult[k]['name']: benchResult[k] for k in sorted(benchResult.keys())}
     results['list'] = benches
 
     indexResults(results)
@@ -1011,6 +1014,7 @@ def logIndexCat(results, cat, outFd):
     head = testCats[cat]['name'] + (" Index Values" if full else " Partial Index")
     print("%-40s %12s %12s %8s" % (head, "BASELINE", "RESULT", "INDEX"), file=outFd)
 
+    print("RESULT:", results)
     for bench in results['list']:
         bresult = results[bench]
         if bresult['cat'] != cat:
@@ -1280,8 +1284,8 @@ def main():
 
     reportFd = reportFd2 = None
     try:
-        #reportFd = open(reportFile, "w", encoding="utf-8")
-        reportFd = sys.stdout
+        reportFd = open(reportFile, "w", encoding="utf-8")
+        #reportFd = sys.stdout
         reportFd2 = open(reportHtml, "w", encoding="utf-8")
 
         print("   BYTE UNIX Benchmarks (Version %s)\n" % version, file=reportFd)
@@ -1300,16 +1304,16 @@ def main():
 
         runFooterHtml(reportFd2)
 
-        if verbose > 0:
-            print()
-            print("========================================================================")
-            os.system(f"cat \"{reportFile}\"")
-
     finally:
         if reportFd and not reportFd.closed:
             reportFd.close()
         if reportFd2 and not reportFd2.closed:
             reportFd2.close()
+
+    if verbose > 0:
+        print()
+        print("========================================================================")
+        os.system(f"cat \"{reportFile}\"")
 
     return 0
 
