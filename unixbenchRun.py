@@ -929,7 +929,7 @@ def runBenchmark(bench, tparams, verbose, logFile, copies):
         os.unlink(os.path.join(TESTDIR, "cctest.o"))
         os.unlink(os.path.join(TESTDIR, "a.out"))
     if verbose > 0:
-        print("\n")
+        print()
 
     return bresult
 
