@@ -998,8 +998,6 @@ def logResults(results, outFd):
             bresult['iterations']
         ), file=outFd)
 
-        print(file=outFd)
-
 
 def logIndexCat(results, cat, outFd):
     total = results['numIndex'][cat] if 'numIndex' in results and cat in results['numIndex'] else None
